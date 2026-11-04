@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+# ccm – Claude Code Manager (Launcher). Der eigentliche Code liegt in ccm.py / ccm_ui.py.
+import os
+import sys
+
+if os.name == "nt":
+    sys.exit("ccm braucht tmux und läuft unter Windows nur in WSL (siehe README).")
+
+_here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, _here)
+
+import ccm  # noqa: E402
+
+ccm.LAUNCHER = os.path.realpath(__file__)
+sys.exit(ccm.main(sys.argv))
