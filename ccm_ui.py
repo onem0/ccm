@@ -1532,6 +1532,9 @@ class UI:
 
     def loop(self):
         self.refresh()
+        note = ccm.pop_update_notice()
+        if note:
+            self.toast("✓ " + note, "ok", 5)
         while not self.quit:
             if time.time() - self.last_refresh >= 1.0:
                 self.refresh()

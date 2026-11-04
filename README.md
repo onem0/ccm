@@ -21,41 +21,39 @@ All your Claude Code sessions in tmux, live in one dashboard. Press Enter to jum
 | [Claude Code](https://github.com/anthropics/claude-code) | current | the sessions themselves |
 | tmux | 3.3 or newer recommended | every session runs in tmux |
 | Python 3 | 3.7 or newer | ccm itself (standard library only, no `pip`) |
-| git | any | downloading and updating |
+| git | any | downloading and auto-updating from GitHub |
 
 ccm runs on **Linux** and **macOS**. On **Windows** it runs inside **WSL**, because tmux doesn't run natively on Windows.
 
 ## Installation
 
+Install the [requirements](#requirements) for your system (see below), then run this one line. You don't need to clone anything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/onem0/ccm/refs/heads/main/install.sh | sh
+```
+
+The script checks Python, tmux, git and Claude Code, downloads ccm from GitHub to `~/.local/share/ccm/app` and puts the `ccm` and `ccn` commands into `~/.local/bin`. Running the line again updates or repairs the installation.
+
 ### Linux
 
 ```sh
-# 1. Dependencies
-sudo apt install tmux python3 git          # Debian / Ubuntu / Raspberry Pi OS
+sudo apt install tmux python3 git curl     # Debian / Ubuntu / Raspberry Pi OS
 # sudo dnf install tmux python3 git        # Fedora
 # sudo pacman -S tmux python git           # Arch
 
-# 2. Claude Code (if not installed yet)
-curl -fsSL https://claude.ai/install.sh | bash
-
-# 3. ccm
-git clone https://github.com/onem0/ccm.git ~/.ccm
-~/.ccm/install.sh
+curl -fsSL https://claude.ai/install.sh | bash                                         # Claude Code, if not installed yet
+curl -fsSL https://raw.githubusercontent.com/onem0/ccm/refs/heads/main/install.sh | sh  # ccm
 ```
 
 ### macOS
 
 ```sh
-# 1. Dependencies (Homebrew: https://brew.sh)
-brew install tmux git
-xcode-select --install       # provides python3 if you don't have it yet (or: brew install python)
+brew install tmux             # Homebrew: https://brew.sh
+xcode-select --install        # provides git and python3 if you don't have them yet
 
-# 2. Claude Code (if not installed yet)
-curl -fsSL https://claude.ai/install.sh | bash
-
-# 3. ccm
-git clone https://github.com/onem0/ccm.git ~/.ccm
-~/.ccm/install.sh
+curl -fsSL https://claude.ai/install.sh | bash                                         # Claude Code, if not installed yet
+curl -fsSL https://raw.githubusercontent.com/onem0/ccm/refs/heads/main/install.sh | sh  # ccm
 ```
 
 If the script says that `~/.local/bin` is not in your `PATH` (common on macOS):
@@ -76,10 +74,9 @@ Then open a new terminal window.
 2. **Terminal:** use [Windows Terminal](https://aka.ms/terminal) with the "Ubuntu" profile. Colors, Unicode and keyboard shortcuts work correctly there.
 3. **Inside Ubuntu (WSL)**, continue exactly as on Linux:
    ```sh
-   sudo apt update && sudo apt install tmux python3 git
-   curl -fsSL https://claude.ai/install.sh | bash      # install Claude Code *inside* WSL
-   git clone https://github.com/onem0/ccm.git ~/.ccm
-   ~/.ccm/install.sh
+   sudo apt update && sudo apt install tmux python3 git curl
+   curl -fsSL https://claude.ai/install.sh | bash                                         # Claude Code *inside* WSL
+   curl -fsSL https://raw.githubusercontent.com/onem0/ccm/refs/heads/main/install.sh | sh  # ccm
    ```
 
 Things to know on Windows:
@@ -88,31 +85,33 @@ Things to know on Windows:
 - Keep your projects in the Linux file system (e.g. `~/dev/...`). Windows drives are mounted under `/mnt/c/...`, and everything is much slower there.
 - To use ccm later, open "Ubuntu" in Windows Terminal and type `ccm`.
 
-### What `install.sh` does
+### Updates
 
-- checks for Python, tmux and Claude Code and tells you what's missing
-- creates `ccm` and `ccn` as symlinks in `~/.local/bin` (for a different folder: `CCM_BIN=/usr/local/bin ./install.sh`)
-- warns you if `~/.local/bin` is not in your `PATH`
+ccm **updates itself from GitHub every time you start it** (`ccm`, `ccn` or any other command). The update runs in the background, so starting is not slowed down, and the new version is used from the next start on. ccm tells you when it has been updated.
 
-Keep the cloned folder (`~/.ccm`): the commands are links into it. You can also install by hand without the script:
-
-```sh
-ln -s ~/.ccm/ccm ~/.local/bin/ccm
-ln -s ~/.ccm/ccm ~/.local/bin/ccn
-```
-
-### Updating
-
-```sh
-git -C ~/.ccm pull
-```
+- An update is only applied if the new code compiles, so a broken commit can't break your installation.
+- Update right now: `ccm update` · show the installed version: `ccm version`
+- Turn auto-updates off with `"auto_update": false` in `~/.config/ccm/config.json` (or `CCM_NO_UPDATE=1`).
+- Auto-updates only apply to installations made with the one-liner. A git clone you work on is never changed automatically (see [Development](#development)).
 
 ### Uninstalling
 
 ```sh
-~/.ccm/install.sh --uninstall           # removes the ccm and ccn commands
-rm -rf ~/.ccm ~/.local/share/ccm        # optional: delete the code and data
+curl -fsSL https://raw.githubusercontent.com/onem0/ccm/refs/heads/main/install.sh | sh -s -- --uninstall
+rm -rf ~/.local/share/ccm        # optional: also delete your sessions and settings
 ```
+
+### Development
+
+To work on ccm itself, clone the repo and link the commands to your clone:
+
+```sh
+git clone https://github.com/onem0/ccm.git && cd ccm
+./install.sh                     # links ccm/ccn to this clone, no auto-update
+./install.sh --uninstall         # removes the links again
+```
+
+Options for `install.sh`: `CCM_BIN` (where the commands go, default `~/.local/bin`), `CCM_HOME` (where the one-liner puts the code), `CCM_REPO` (git URL to install from, e.g. your fork).
 
 ## Quick start
 
@@ -139,6 +138,7 @@ ccm                    # dashboard with all sessions
 | `ccm kill <name>` | stop Claude (the session stays in the list and can be resumed) |
 | `ccm resume <name>` | resume a stopped session (`--fresh`: without the history) |
 | `ccm rename <old> <new>` / `ccm rm <name>` | rename / remove |
+| `ccm update` / `ccm version` | update from GitHub now / show the installed version |
 | `ccm help` | all options |
 
 ## Dashboard keys
@@ -158,7 +158,8 @@ ccm                    # dashboard with all sessions
 ## Files
 
 - Code: `ccm.py` = logic and CLI, `ccm_ui.py` = dashboard, `ccm` = launcher script. Python standard library only.
-- Commands: `~/.local/bin/ccm` and `~/.local/bin/ccn` (symlinks to the `ccm` launcher in the repo)
+- Installed code (one-liner): `~/.local/share/ccm/app/`, a git checkout that ccm keeps up to date
+- Commands: `~/.local/bin/ccm` and `~/.local/bin/ccn` (symlinks to the `ccm` launcher)
 - Data: `~/.local/share/ccm/` (readable only by you, since it contains your prompts and Claude's replies)
 - Optional `~/.config/ccm/config.json`, e.g. for default arguments for every new session:
   ```json

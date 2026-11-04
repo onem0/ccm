@@ -1465,6 +1465,9 @@ ccm %s – Claude-Code-Sessions in tmux
   ccm resume <name>         beendete Session fortsetzen (--fresh: ohne Verlauf)
   ccm rm <name>             Session beenden und aus der Liste entfernen
   ccm config                Konfiguration anzeigen
+  ccm update                jetzt von GitHub aktualisieren (passiert sonst
+                            automatisch bei jedem Start)
+  ccm version               Version anzeigen
 
 In einer Session:   Ctrl-Q  → zurück (Claude arbeitet im Hintergrund weiter)
 """ % VERSION
@@ -1751,6 +1754,131 @@ def cmd_tmux_status(cur):
     return 0
 
 
+# ───────────────────────────── Auto-Update über GitHub ─────────────────────────────
+# Nur für Installationen per install.sh-Einzeiler (Marker-Datei .ccm-managed im
+# Code-Ordner). Ein Entwicklungs-Checkout wird nie automatisch verändert.
+
+UPDATE_STAMP = os.path.join(DATA, "update-check")
+UPDATE_NOTE = os.path.join(DATA, "updated")
+BRANCH = "main"
+
+
+def app_dir():
+    return os.path.dirname(os.path.realpath(LAUNCHER))
+
+
+def managed_install():
+    return os.path.isfile(os.path.join(app_dir(), ".ccm-managed"))
+
+
+def _git(*args, timeout=60):
+    import subprocess
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+    return subprocess.run(["git", "-C", app_dir()] + list(args), capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=timeout, env=env, errors="replace")
+
+
+def app_revision():
+    try:
+        r = _git("rev-parse", "--short", "HEAD", timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def start_update():
+    """Bei jedem Start im Hintergrund nach Updates schauen (höchstens 1× pro Minute)."""
+    if os.environ.get("CCM_NO_UPDATE") or not managed_install():
+        return
+    if load_config().get("auto_update") is False:
+        return
+    try:
+        if now() - os.path.getmtime(UPDATE_STAMP) < 60:
+            return
+    except OSError:
+        pass
+    import subprocess
+    try:
+        with open(UPDATE_STAMP, "w"):
+            pass
+        subprocess.Popen([sys.executable, LAUNCHER, "_update"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, cwd=app_dir())
+    except OSError:
+        pass
+
+
+def cmd_update(verbose=False):
+    """Neuesten Stand von GitHub holen. Wird nur übernommen, wenn der neue Code
+    sich übersetzen lässt – ein kaputter Commit legt ccm also nicht lahm."""
+    def say(msg):
+        if verbose:
+            print(msg)
+    if not managed_install():
+        say("Dieser ccm-Ordner (%s) ist keine install.sh-Installation – bitte selbst mit git aktualisieren."
+            % tilde(app_dir()))
+        return 0 if not verbose else 1
+    import fcntl
+    with open(os.path.join(DATA, ".update.lock"), "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            say("Es läuft schon ein Update.")
+            return 0
+        try:
+            old = app_revision()
+            r = _git("fetch", "-q", "--depth", "1", "origin", BRANCH)
+            if r.returncode != 0:
+                say("Update fehlgeschlagen: %s" % (r.stderr.strip() or "git fetch"))
+                return 1
+            new = _git("rev-parse", "--short", "FETCH_HEAD", timeout=5).stdout.strip()
+            if not new or new == old:
+                say("ccm ist aktuell (%s)." % old)
+                return 0
+            for f in ("ccm.py", "ccm_ui.py", "ccm"):
+                src = _git("show", "FETCH_HEAD:" + f, timeout=10)
+                if src.returncode != 0:
+                    say("Update übersprungen: %s fehlt in %s." % (f, new))
+                    return 1
+                try:
+                    compile(src.stdout, f, "exec")
+                except SyntaxError as e:
+                    say("Update übersprungen: %s in %s ist fehlerhaft (%s)." % (f, new, e))
+                    return 1
+            r = _git("reset", "-q", "--hard", "FETCH_HEAD")
+            if r.returncode != 0:
+                say("Update fehlgeschlagen: %s" % r.stderr.strip())
+                return 1
+            # Python erkennt geänderte Dateien am Zeitstempel (Sekunden) + Größe. Läuft das
+            # Update in derselben Sekunde wie der Start, bliebe sonst alter Bytecode aktiv.
+            import shutil
+            shutil.rmtree(os.path.join(app_dir(), "__pycache__"), ignore_errors=True)
+            write_json(UPDATE_NOTE, {"old": old, "new": new, "t": round(now())})
+            say("ccm aktualisiert: %s → %s" % (old, new))
+            return 0
+        except Exception as e:
+            say("Update fehlgeschlagen: %s" % e)
+            return 1
+
+
+def pop_update_notice():
+    d = read_json(UPDATE_NOTE, None)
+    if not isinstance(d, dict):
+        return None
+    try:
+        os.remove(UPDATE_NOTE)
+    except OSError:
+        pass
+    return "ccm wurde aktualisiert (%s → %s)" % (d.get("old") or "?", d.get("new") or "?")
+
+
+def show_update_notice():
+    if sys.stderr.isatty():
+        msg = pop_update_notice()
+        if msg:
+            eprint("\x1b[32m✓\x1b[0m " + msg)
+
+
 def cmd_dashboard():
     if not tty():
         return cmd_ls([])
@@ -1780,8 +1908,11 @@ def main(argv=None):
     prog = os.path.basename(argv[0]) if argv else "ccm"
     args = argv[1:]
     secure_data_dir()
+    if prog == "ccn" or not args or not args[0].startswith("_"):
+        start_update()   # nur bei Befehlen von dir, nicht bei Hooks & Statusleiste
     try:
         if prog == "ccn":
+            show_update_notice()
             return cmd_new(args)
         if not args:
             return cmd_dashboard()
@@ -1794,12 +1925,19 @@ def main(argv=None):
             return cmd_run(rest[0])
         if c == "_status":
             return cmd_tmux_status(rest[0] if rest else "")
+        if c == "_update":
+            return cmd_update()
+        show_update_notice()
         if c in ("help", "-h", "--help"):
             print(HELP)
             return 0
         if c in ("version", "--version", "-V"):
-            print("ccm " + VERSION)
+            rev = app_revision()
+            print("ccm %s%s%s" % (VERSION, " (%s)" % rev if rev else "",
+                                  "" if managed_install() else " · ohne Auto-Update"))
             return 0
+        if c == "update":
+            return cmd_update(verbose=True)
         fn = COMMANDS.get(c)
         if not fn:
             eprint("ccm: unbekannter Befehl »%s«\n" % c)
