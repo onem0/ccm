@@ -1,10 +1,10 @@
 #!/bin/sh
-# ccm – Installation für Linux, macOS und Windows (WSL).
+# ccm – installer for Linux, macOS and Windows (WSL).
 #
-#   ./install.sh               Befehle ccm und ccn nach ~/.local/bin verlinken
-#   ./install.sh --uninstall   Links wieder entfernen (Daten bleiben erhalten)
+#   ./install.sh               link the ccm and ccn commands into ~/.local/bin
+#   ./install.sh --uninstall   remove the links again (data is kept)
 #
-# Anderer Zielordner:  CCM_BIN=/usr/local/bin ./install.sh
+# Different target folder:  CCM_BIN=/usr/local/bin ./install.sh
 
 set -eu
 
@@ -23,37 +23,37 @@ die()  { printf '  %s✗%s %s\n' "$R" "$N" "$1" >&2; exit 1; }
 case $(uname -s) in
     Darwin) OS=macos ;;
     Linux)  if grep -qi microsoft /proc/version 2>/dev/null; then OS=wsl; else OS=linux; fi ;;
-    *)      die "Nicht unterstütztes System: $(uname -s). Unter Windows bitte in WSL installieren." ;;
+    *)      die "Unsupported system: $(uname -s). On Windows, please install inside WSL." ;;
 esac
 
 if [ "$OS" = macos ]; then
     HINT_TMUX="brew install tmux"
-    HINT_PY="xcode-select --install   (oder: brew install python)"
+    HINT_PY="xcode-select --install   (or: brew install python)"
 else
     HINT_TMUX="sudo apt install tmux   (Fedora: sudo dnf install tmux · Arch: sudo pacman -S tmux)"
     HINT_PY="sudo apt install python3"
 fi
 
-# ── Deinstallation ──────────────────────────────────────────────────────────
+# ── Uninstall ───────────────────────────────────────────────────────────────
 if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "uninstall" ]; then
-    printf '%sccm deinstallieren%s\n' "$B" "$N"
+    printf '%sUninstalling ccm%s\n' "$B" "$N"
     for c in ccm ccn; do
         if [ -L "$BIN/$c" ] && [ "$(readlink "$BIN/$c")" = "$DIR/ccm" ]; then
-            rm "$BIN/$c" && ok "$BIN/$c entfernt"
+            rm "$BIN/$c" && ok "removed $BIN/$c"
         fi
     done
-    printf '\nDaten (Sessions, Hooks) liegen weiterhin in %s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/ccm"
-    printf 'Komplett löschen: rm -rf "%s" "%s"\n' "${XDG_DATA_HOME:-$HOME/.local/share}/ccm" "$DIR"
+    printf '\nData (sessions, hooks) is still in %s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/ccm"
+    printf 'To delete everything: rm -rf "%s" "%s"\n' "${XDG_DATA_HOME:-$HOME/.local/share}/ccm" "$DIR"
     exit 0
 fi
 
-printf '%sccm installieren%s (%s)\n' "$B" "$N" "$OS"
+printf '%sInstalling ccm%s (%s)\n' "$B" "$N" "$OS"
 
-# ── Voraussetzungen ─────────────────────────────────────────────────────────
-command -v python3 >/dev/null 2>&1 || die "python3 fehlt → $HINT_PY"
+# ── Requirements ────────────────────────────────────────────────────────────
+command -v python3 >/dev/null 2>&1 || die "python3 is missing → $HINT_PY"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))' \
-    || die "Python 3.7 oder neuer nötig (gefunden: $(python3 -V 2>&1)) → $HINT_PY"
-python3 -c 'import curses' 2>/dev/null || die "Python-Modul curses fehlt → $HINT_PY"
+    || die "Python 3.7 or newer is required (found: $(python3 -V 2>&1)) → $HINT_PY"
+python3 -c 'import curses' 2>/dev/null || die "Python module curses is missing → $HINT_PY"
 ok "$(python3 -V 2>&1)"
 
 if command -v tmux >/dev/null 2>&1; then
@@ -61,30 +61,30 @@ if command -v tmux >/dev/null 2>&1; then
     if echo "$TV" | awk -F. '{ exit !($1 > 3 || ($1 == 3 && $2 >= 3)) }'; then
         ok "tmux $TV"
     else
-        warn "tmux $TV gefunden – empfohlen ist 3.3 oder neuer (ältere Versionen gehen meist, einzelne Optionen fehlen)"
+        warn "found tmux $TV – 3.3 or newer is recommended (older versions mostly work, a few options are missing)"
     fi
 else
-    die "tmux fehlt → $HINT_TMUX"
+    die "tmux is missing → $HINT_TMUX"
 fi
 
 if command -v claude >/dev/null 2>&1; then
-    ok "Claude Code gefunden ($(command -v claude))"
+    ok "found Claude Code ($(command -v claude))"
 else
-    warn "claude nicht im PATH – Claude Code installieren:  curl -fsSL https://claude.ai/install.sh | bash"
+    warn "claude is not in PATH – install Claude Code:  curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
-# ── Befehle verlinken ───────────────────────────────────────────────────────
+# ── Link the commands ───────────────────────────────────────────────────────
 chmod +x "$DIR/ccm"
 mkdir -p "$BIN"
 for c in ccm ccn; do
     if [ -e "$BIN/$c" ] && [ ! -L "$BIN/$c" ]; then
-        die "$BIN/$c existiert bereits und ist kein Link – bitte selbst prüfen und entfernen"
+        die "$BIN/$c already exists and is not a symlink – please check it and remove it yourself"
     fi
     ln -sfn "$DIR/ccm" "$BIN/$c"
     ok "$BIN/$c → $DIR/ccm"
 done
 
-# ── PATH prüfen ─────────────────────────────────────────────────────────────
+# ── Check PATH ──────────────────────────────────────────────────────────────
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *)
@@ -95,7 +95,7 @@ case ":$PATH:" in
             *)      RC="~/.profile" ;;
         esac
         printf '\n'
-        warn "$BIN ist nicht im PATH. Einmalig ausführen und Terminal neu öffnen:"
+        warn "$BIN is not in your PATH. Run this once, then open a new terminal:"
         if [ -n "$RC" ]; then
             printf "      echo 'export PATH=\"%s:\$PATH\"' >> %s\n" "$BIN" "$RC"
         else
@@ -104,6 +104,6 @@ case ":$PATH:" in
         ;;
 esac
 
-printf '\n%sFertig.%s Im Projektordner %sccn%s starten, Übersicht mit %sccm%s, Hilfe: ccm help\n' \
+printf '\n%sDone.%s Run %sccn%s in a project folder, %sccm%s for the dashboard, help: ccm help\n' \
     "$G" "$N" "$B" "$N" "$B" "$N"
-printf 'Der Ordner %s muss bestehen bleiben (die Befehle sind Links dorthin).\n' "$DIR"
+printf 'Keep the folder %s – the commands are links into it.\n' "$DIR"

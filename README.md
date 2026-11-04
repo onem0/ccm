@@ -1,6 +1,6 @@
 # ccm – Claude Code Manager
 
-Alle Claude-Code-Sessions in tmux, live in einem Dashboard. Mit Enter springst du hinein, mit **Ctrl-Q** wieder heraus. Claude arbeitet währenddessen im Hintergrund weiter.
+All your Claude Code sessions in tmux, live in one dashboard. Press Enter to jump into a session and **Ctrl-Q** to jump back out. Claude keeps working in the background.
 
 ```
  ◆ ccm  Claude Code Sessions                         ⠹ 1 aktiv   ▲ 1 wartet   ● 1 fertig
@@ -9,31 +9,33 @@ Alle Claude-Code-Sessions in tmux, live in einem Dashboard. Mit Enter springst d
   ▲ shop      Freigabe nötig · 10s  ~/dev/shop          → Bash · rm -rf dist
   ● docs      fertig · 1m           ~/dev/docs          „Die Doku ist aktualisiert …“
 ── api ⠹ arbeitet ─────────────────────────────────────────────────── ⇥  Live  Verlauf ──
-  (Live-Bildschirm der gewählten Session)
+  (live screen of the selected session)
 ```
 
-## Voraussetzungen
+> **Note:** the interface itself (dashboard, status labels, `ccm help`) is currently in German. For example, *arbeitet* = working, *Freigabe nötig* = needs permission, *fertig* = done, *wartet* = waiting.
 
-| | Version | Wozu |
+## Requirements
+
+| | Version | Used for |
 |---|---|---|
-| [Claude Code](https://github.com/anthropics/claude-code) | aktuell | die Sessions selbst |
-| tmux | 3.3 oder neuer empfohlen | jede Session läuft in tmux |
-| Python 3 | 3.7 oder neuer | ccm selbst – nur Standardbibliothek, kein `pip` |
-| git | beliebig | zum Herunterladen und Aktualisieren |
+| [Claude Code](https://github.com/anthropics/claude-code) | current | the sessions themselves |
+| tmux | 3.3 or newer recommended | every session runs in tmux |
+| Python 3 | 3.7 or newer | ccm itself (standard library only, no `pip`) |
+| git | any | downloading and updating |
 
-ccm läuft auf **Linux** und **macOS**. Unter **Windows** läuft es in **WSL** (tmux gibt es nicht nativ für Windows).
+ccm runs on **Linux** and **macOS**. On **Windows** it runs inside **WSL**, because tmux doesn't run natively on Windows.
 
 ## Installation
 
 ### Linux
 
 ```sh
-# 1. Abhängigkeiten
+# 1. Dependencies
 sudo apt install tmux python3 git          # Debian / Ubuntu / Raspberry Pi OS
 # sudo dnf install tmux python3 git        # Fedora
 # sudo pacman -S tmux python git           # Arch
 
-# 2. Claude Code (falls noch nicht installiert)
+# 2. Claude Code (if not installed yet)
 curl -fsSL https://claude.ai/install.sh | bash
 
 # 3. ccm
@@ -44,11 +46,11 @@ git clone https://github.com/onem0/ccm.git ~/.ccm
 ### macOS
 
 ```sh
-# 1. Abhängigkeiten (Homebrew: https://brew.sh)
+# 1. Dependencies (Homebrew: https://brew.sh)
 brew install tmux git
-xcode-select --install       # liefert python3, falls noch nicht vorhanden (alternativ: brew install python)
+xcode-select --install       # provides python3 if you don't have it yet (or: brew install python)
 
-# 2. Claude Code (falls noch nicht installiert)
+# 2. Claude Code (if not installed yet)
 curl -fsSL https://claude.ai/install.sh | bash
 
 # 3. ccm
@@ -56,109 +58,109 @@ git clone https://github.com/onem0/ccm.git ~/.ccm
 ~/.ccm/install.sh
 ```
 
-Falls das Skript meldet, dass `~/.local/bin` nicht im `PATH` ist (bei macOS üblich):
+If the script says that `~/.local/bin` is not in your `PATH` (common on macOS):
 
 ```sh
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 ```
 
-Danach das Terminal neu öffnen.
+Then open a new terminal window.
 
-### Windows (über WSL)
+### Windows (via WSL)
 
-1. **WSL installieren.** PowerShell *als Administrator* öffnen:
+1. **Install WSL.** Open PowerShell *as Administrator* and run:
    ```powershell
    wsl --install
    ```
-   Den PC neu starten. Danach öffnet sich Ubuntu und fragt nach Benutzername und Passwort.
-2. **Terminal:** am besten das [Windows Terminal](https://aka.ms/terminal) mit dem Profil „Ubuntu“ benutzen. Dort funktionieren Farben, Unicode und Tastenkürzel richtig.
-3. **In Ubuntu (WSL)** genau wie unter Linux weitermachen:
+   Restart your PC. Ubuntu then opens and asks you for a username and password.
+2. **Terminal:** use [Windows Terminal](https://aka.ms/terminal) with the "Ubuntu" profile. Colors, Unicode and keyboard shortcuts work correctly there.
+3. **Inside Ubuntu (WSL)**, continue exactly as on Linux:
    ```sh
    sudo apt update && sudo apt install tmux python3 git
-   curl -fsSL https://claude.ai/install.sh | bash      # Claude Code *in* WSL installieren
+   curl -fsSL https://claude.ai/install.sh | bash      # install Claude Code *inside* WSL
    git clone https://github.com/onem0/ccm.git ~/.ccm
    ~/.ccm/install.sh
    ```
 
-Wichtig unter Windows:
+Things to know on Windows:
 
-- Claude Code muss **in WSL** installiert sein. Eine Windows-Installation von Claude Code kann ccm nicht benutzen.
-- Projekte am besten im Linux-Dateisystem ablegen (z.B. `~/dev/...`). Windows-Laufwerke liegen unter `/mnt/c/...`, dort ist alles deutlich langsamer.
-- Später startest du ccm, indem du „Ubuntu“ im Windows Terminal öffnest und `ccm` eingibst.
+- Claude Code must be installed **inside WSL**. ccm can't use a Windows installation of Claude Code.
+- Keep your projects in the Linux file system (e.g. `~/dev/...`). Windows drives are mounted under `/mnt/c/...`, and everything is much slower there.
+- To use ccm later, open "Ubuntu" in Windows Terminal and type `ccm`.
 
-### Was `install.sh` macht
+### What `install.sh` does
 
-- prüft Python, tmux und Claude Code und sagt dir, was fehlt
-- legt `ccm` und `ccn` als Links in `~/.local/bin` an (anderer Ordner: `CCM_BIN=/usr/local/bin ./install.sh`)
-- weist dich darauf hin, falls `~/.local/bin` nicht im `PATH` ist
+- checks for Python, tmux and Claude Code and tells you what's missing
+- creates `ccm` and `ccn` as symlinks in `~/.local/bin` (for a different folder: `CCM_BIN=/usr/local/bin ./install.sh`)
+- warns you if `~/.local/bin` is not in your `PATH`
 
-Der geklonte Ordner (`~/.ccm`) muss bestehen bleiben, denn die Befehle verweisen dorthin. Ohne Skript geht es auch von Hand:
+Keep the cloned folder (`~/.ccm`): the commands are links into it. You can also install by hand without the script:
 
 ```sh
 ln -s ~/.ccm/ccm ~/.local/bin/ccm
 ln -s ~/.ccm/ccm ~/.local/bin/ccn
 ```
 
-### Aktualisieren
+### Updating
 
 ```sh
 git -C ~/.ccm pull
 ```
 
-### Deinstallieren
+### Uninstalling
 
 ```sh
-~/.ccm/install.sh --uninstall           # entfernt die Befehle ccm und ccn
-rm -rf ~/.ccm ~/.local/share/ccm        # optional: Code und Daten löschen
+~/.ccm/install.sh --uninstall           # removes the ccm and ccn commands
+rm -rf ~/.ccm ~/.local/share/ccm        # optional: delete the code and data
 ```
 
-## Schnellstart
+## Quick start
 
 ```sh
-cd ~/dev/mein-projekt
-ccn                    # neue Claude-Session hier starten und direkt öffnen
-                       # … Ctrl-Q bringt dich zurück ins Terminal
-ccm                    # Dashboard mit allen Sessions
+cd ~/dev/my-project
+ccn                    # start a new Claude session here and open it
+                       # … Ctrl-Q takes you back to your shell
+ccm                    # dashboard with all sessions
 ```
 
-## Befehle
+## Commands
 
-| Befehl | Was passiert |
+| Command | What it does |
 |---|---|
-| `ccm` | Dashboard öffnen |
-| `ccn` | neue Session im **aktuellen Ordner** starten und direkt öffnen |
-| `ccn "Fix die Tests"` | dasselbe, Claude legt sofort mit der Aufgabe los |
-| `ccn --model sonnet` | unbekannte Optionen gehen direkt an `claude` |
-| `ccn -d "Aufgabe"` | im Hintergrund starten, nicht öffnen |
-| `ccm a [name]` | Session öffnen (ohne Name: die im aktuellen Ordner) |
-| `ccm ls` | alle Sessions mit Status auflisten (`--json` für Skripte) |
-| `ccm peek <name>` | Bildschirm einer Session ansehen, ohne sie zu öffnen |
-| `ccm send <name> <text>` | Nachricht an eine Session schicken |
-| `ccm kill <name>` | Claude stoppen (bleibt in der Liste, fortsetzbar) |
-| `ccm resume <name>` | gestoppte Session fortsetzen (`--fresh`: ohne Verlauf) |
-| `ccm rename <alt> <neu>` / `ccm rm <name>` | umbenennen / entfernen |
-| `ccm help` | alle Optionen |
+| `ccm` | open the dashboard |
+| `ccn` | start a new session in the **current folder** and open it |
+| `ccn "Fix the tests"` | same, and Claude starts on the task right away |
+| `ccn --model sonnet` | unknown options are passed straight to `claude` |
+| `ccn -d "task"` | start in the background without opening it |
+| `ccm a [name]` | open a session (without a name: the one in the current folder) |
+| `ccm ls` | list all sessions with their status (`--json` for scripts) |
+| `ccm peek <name>` | look at a session's screen without opening it |
+| `ccm send <name> <text>` | send a message to a session |
+| `ccm kill <name>` | stop Claude (the session stays in the list and can be resumed) |
+| `ccm resume <name>` | resume a stopped session (`--fresh`: without the history) |
+| `ccm rename <old> <new>` / `ccm rm <name>` | rename / remove |
+| `ccm help` | all options |
 
-## Dashboard-Tasten
+## Dashboard keys
 
-`↑↓`/`jk` wählen · `↵` öffnen (gestoppte werden fortgesetzt) · `n` neue Session (Ordnersuche mit Tab-Vervollständigung) · `s` Nachricht senden · `1`–`9` Freigabe/Rückfrage direkt beantworten · `r` umbenennen · `x` stoppen/entfernen · `F` frisch starten · `Tab` Live ↔ Verlauf · `/` filtern · `o` sortieren · `v` Vorschau · `?` Hilfe · `q` schließen
+`↑↓`/`jk` select · `↵` open (stopped sessions are resumed) · `n` new session (folder picker with Tab completion) · `s` send a message · `1`–`9` answer a permission prompt or question directly · `r` rename · `x` stop/remove · `F` start fresh · `Tab` Live ↔ History · `/` filter · `o` sort · `v` preview · `?` help · `q` quit
 
-## Wie es funktioniert
+## How it works
 
-- Jede Session ist eine tmux-Session auf einem eigenen Server (`tmux -L ccm ls`). Deine eigenen tmux-Sessions werden nicht berührt.
-- Der tmux-Server hat **kein Prefix**, damit es keinen Konflikt mit Claudes `Ctrl-B` gibt. Einzige Taste: `Ctrl-Q` = zurück. Unten zeigt eine Statuszeile, welche anderen Sessions gerade warten oder fertig sind.
-- Claude startet mit `--settings ~/.local/share/ccm/claude-hooks.json`. Die Hooks melden jedes Event (Prompt, Tool, Freigabe, fertig …) an `ccm`. Deine `~/.claude/settings.json` bleibt unverändert.
-- Zusätzlich wird der Bildschirm jeder Session ausgewertet. So stimmt der Status auch nach einem Esc-Abbruch oder bei Dialogen.
-- Gestoppte Sessions (auch nach einem Neustart des Rechners) werden mit `claude --resume <id>` genau dort fortgesetzt.
+- Every session is a tmux session on a separate tmux server (`tmux -L ccm ls`). Your own tmux sessions are left alone.
+- This tmux server has **no prefix key**, so it doesn't clash with Claude's `Ctrl-B`. The only key is `Ctrl-Q` = back. A status bar at the bottom shows which other sessions are waiting or done.
+- Claude is started with `--settings ~/.local/share/ccm/claude-hooks.json`. The hooks report every event (prompt, tool call, permission request, done …) to `ccm`. Your `~/.claude/settings.json` is not changed.
+- ccm also reads each session's screen, so the status stays correct after an Esc interrupt or while a dialog is open.
+- Stopped sessions (even after a reboot) are resumed exactly where they left off with `claude --resume <id>`.
 
-## Dateien
+## Files
 
-- Code: `ccm.py` = Logik und CLI, `ccm_ui.py` = Dashboard, `ccm` = Startskript. Nur Python-Standardbibliothek.
-- Befehle: `~/.local/bin/ccm` und `~/.local/bin/ccn` (Links auf das Startskript `ccm` im Repo)
-- Daten: `~/.local/share/ccm/`
-- Optional `~/.config/ccm/config.json`, z.B. für Standard-Argumente jeder neuen Session:
+- Code: `ccm.py` = logic and CLI, `ccm_ui.py` = dashboard, `ccm` = launcher script. Python standard library only.
+- Commands: `~/.local/bin/ccm` and `~/.local/bin/ccn` (symlinks to the `ccm` launcher in the repo)
+- Data: `~/.local/share/ccm/` (readable only by you, since it contains your prompts and Claude's replies)
+- Optional `~/.config/ccm/config.json`, e.g. for default arguments for every new session:
   ```json
   { "claude_args": ["--model", "sonnet"] }
   ```
-  Liegt `claude` nicht im `PATH`, kannst du den Pfad hier mit `"claude": "/pfad/zu/claude"` angeben.
-- Optional `~/.config/ccm/tmux.conf` für eigene tmux-Einstellungen (wird zuletzt geladen).
+  If `claude` is not in your `PATH`, you can set its location here with `"claude": "/path/to/claude"`.
+- Optional `~/.config/ccm/tmux.conf` for your own tmux settings (loaded last).
