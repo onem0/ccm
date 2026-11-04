@@ -909,7 +909,7 @@ class UI:
             vs = [v for v in vs if q in v.name.lower() or q in ccm.tilde(v.cwd).lower()]
         if self.sort_activity:
             vs = sorted(vs, key=lambda v: -float(v.st.get("t") or v.meta.get("created") or 0))
-        return vs
+        return ccm.tree_order(vs)    # Unter-Sessions unter ihrer Eltern-Session
 
     def selected(self):
         vis = self.visible()
@@ -1040,7 +1040,7 @@ class UI:
         W = self.W
         c = Cols()
         c.x_name = 4
-        c.name_w = min(24, max([8] + [dw(v.name) for v in vis]))
+        c.name_w = min(28, max([8] + [dw(ccm.tree_prefix(v) + v.name) for v in vis]))
         c.x_status = c.x_name + c.name_w + 2
         c.status_w = 21
         c.dir_w = 0
@@ -1128,7 +1128,11 @@ class UI:
         self.put(y, 2, g, self.c(gcol, bg, bold=gbold))
         strong = sel or v.unseen or v.status in ccm.ATTN
         ncol = -1 if v.status != "exited" else MUTED
-        self.put(y, cols.x_name, v.name, self.c(fg(ncol), bg, bold=strong), w=cols.name_w)
+        x = cols.x_name
+        pre = ccm.tree_prefix(v)
+        if pre:
+            x = self.put(y, x, pre, self.c(fg(DIM), bg), w=cols.name_w)
+        self.put(y, x, v.name, self.c(fg(ncol), bg, bold=strong), w=max(1, cols.x_name + cols.name_w - x))
         scol = STATUS_COLOR.get(v.status, MUTED)
         label = v.note or ccm.LABELS.get(v.status, v.status)
         x = self.put(y, cols.x_status, label, self.c(scol, bg, bold=v.status in ccm.ATTN), w=cols.status_w)

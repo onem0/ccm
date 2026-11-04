@@ -19,7 +19,7 @@ import sys
 import json
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOME = os.path.expanduser("~")
 SOCKET = os.environ.get("CCM_SOCKET") or "ccm"
 TPREFIX = "ccm-"
@@ -33,6 +33,7 @@ DATA = os.environ.get("CCM_DATA") or os.path.join(_xdg("XDG_DATA_HOME", ".local/
 SESS_DIR = os.path.join(DATA, "sessions")
 STATE_DIR = os.path.join(DATA, "state")
 EVENT_DIR = os.path.join(DATA, "events")
+RESULT_DIR = os.path.join(DATA, "results")
 HOOKS_PATH = os.path.join(DATA, "claude-hooks.json")
 TMUX_CONF = os.path.join(DATA, "tmux.conf")
 STATUS_SH = os.path.join(DATA, "tmux-status.sh")
@@ -47,6 +48,12 @@ DEFAULT_CONFIG = {
     "claude": "claude",
     # Argumente, die jede neue Session bekommt, z.B. ["--model", "sonnet"]
     "claude_args": [],
+    # Sessions dürfen per `ccm` eigene Unter-Sessions starten (siehe AGENT_PROMPT)
+    "agents": True,
+    # wie tief Unter-Sessions wieder Unter-Sessions starten dürfen (1 = nur eine Ebene)
+    "max_depth": 1,
+    # höchstens so viele laufende Unter-Sessions pro Session
+    "max_children": 10,
 }
 
 # Umgebungsvariablen, die eine *laufende* Claude-Session setzt. Startet man ccm
@@ -442,6 +449,9 @@ def handle_hook(sid, d):
         st["event"] = ev
         st["t"] = t
         sess = d.get("session_id")
+        pm = d.get("permission_mode")
+        if isinstance(pm, str) and pm:
+            st["perm_mode"] = pm    # damit Unter-Sessions nicht mehr dürfen als diese
         if sess and ev in ("SessionStart", "UserPromptSubmit"):
             st["claude_sid"] = sess
         if d.get("transcript_path") and ev in ("SessionStart", "UserPromptSubmit"):
@@ -537,6 +547,7 @@ def handle_hook(sid, d):
             msg = str(d.get("last_assistant_message") or "")
             if msg:
                 st["last_msg"] = msg[:4000]
+                save_result(sid, msg)
             st["done_t"] = t
             st["subagents"] = 0
             for k in ("perm", "question"):
@@ -551,6 +562,7 @@ def handle_hook(sid, d):
             msg = d.get("last_assistant_message")
             if msg:
                 st["last_msg"] = str(msg)[:4000]
+                save_result(sid, str(msg))
             st["done_t"] = t
             _set(st, "error", t)
             return {"k": "error", "x": st["error"]}
@@ -578,6 +590,27 @@ def handle_hook(sid, d):
         return None
 
     update_state(sid, fn)
+
+
+def result_path(i):
+    return os.path.join(RESULT_DIR, i + ".md")
+
+
+def save_result(i, msg):
+    """Letzte Antwort vollständig ablegen (state.json kürzt auf 4000 Zeichen) –
+    das ist das „Ergebnis“, das `ccm result` an die startende Session gibt."""
+    try:
+        write_if_changed(result_path(i), msg if msg.endswith("\n") else msg + "\n")
+    except OSError:
+        pass
+
+
+def read_result(i):
+    try:
+        with open(result_path(i), encoding="utf-8") as f:
+            return f.read().rstrip("\n")
+    except OSError:
+        return read_state(i).get("last_msg") or ""
 
 
 def cmd_hook():
@@ -619,7 +652,12 @@ def ensure_hooks_file():
     own = user_statusline()
     if own and isinstance(own.get("padding"), int):
         sl["padding"] = own["padding"]
-    write_if_changed(HOOKS_PATH, json.dumps({"hooks": hooks, "statusLine": sl}, indent=1) + "\n")
+    out = {"hooks": hooks, "statusLine": sl}
+    if agents_enabled():
+        # Nur lesende ccm-Befehle ohne Rückfrage. Starten und Steuern von Sessions
+        # (ccm new / send / kill …) fragt Claude weiterhin wie jeden anderen Befehl.
+        out["permissions"] = {"allow": ["Bash(ccm %s:*)" % c for c in READONLY_CMDS]}
+    write_if_changed(HOOKS_PATH, json.dumps(out, indent=1) + "\n")
     return HOOKS_PATH
 
 
@@ -931,11 +969,16 @@ def tmux_start(meta, cols=None, rows=None):
 
 # ───────────────────────────── Lebenszyklus ─────────────────────────────
 
-def create_session(cwd, name=None, prompt=None, args=None, cols=None, rows=None):
+def create_session(cwd, name=None, prompt=None, args=None, cols=None, rows=None, parent=None):
     cwd = os.path.realpath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
         raise CCMError("Ordner existiert nicht: %s" % tilde(cwd))
     cfg = load_config()
+    depth = 0
+    if parent:
+        args, depth, text = child_args(parent, list(args or []), cfg)
+        if text:
+            prompt = (prompt + " " + text) if prompt else text
     claude = resolve_claude(cfg)
     metas = load_metas()
     base = clean_name(name) or clean_name(os.path.basename(cwd)) or "home"
@@ -952,6 +995,9 @@ def create_session(cwd, name=None, prompt=None, args=None, cols=None, rows=None)
         "launched": 0,
         "last_seen": t,
     }
+    if parent:
+        meta["parent"] = parent["id"]
+        meta["depth"] = depth
     save_meta(meta)
     write_json(state_path(meta["id"]), {"status": "starting", "since": t, "t": t})
     try:
@@ -968,7 +1014,7 @@ def kill_session(meta):
 
 def remove_files(i):
     for p in (meta_path(i), state_path(i), os.path.join(STATE_DIR, "." + i + ".lock"),
-              os.path.join(EVENT_DIR, i + ".jsonl")):
+              os.path.join(EVENT_DIR, i + ".jsonl"), result_path(i)):
         try:
             os.remove(p)
         except OSError:
@@ -991,6 +1037,10 @@ def resume_session(meta, fresh=False, cols=None, rows=None):
                 st.pop(k, None)
             return {"k": "start", "x": "frisch"}
         update_state(meta["id"], fn)
+        try:
+            os.remove(result_path(meta["id"]))
+        except OSError:
+            pass
         meta = update_meta(meta["id"], prompt=None) or meta
     tmux_start(meta, cols, rows)
 
@@ -1005,6 +1055,175 @@ def rename_session(meta, new):
     meta = update_meta(meta["id"], name=new) or meta
     tmux_run(["set-option", "-t", "=%s%s:" % (TPREFIX, meta["id"]), "@ccm_name", new])
     return meta
+
+
+# ───────────────────────────── Unter-Sessions ─────────────────────────────
+# Eine Claude-Session in ccm kann mit `ccm new -d …` weitere, vollwertige
+# Claude-Code-Sessions starten (statt Subagents), auf sie warten (`ccm wait`)
+# und ihr Ergebnis lesen (`ccm result`). Die startende Session erkennt ccm an
+# der Umgebungsvariable CCM_ID, die jede Session an Claude weitergibt.
+#
+# Sicherheit: Unter-Sessions bekommen nie mehr Rechte als ihre Eltern-Session
+# (Permission-Mode wird vererbt, weitere claude-Optionen nur aus einer Positivliste),
+# und eine Session kann keine Freigabe-Dialoge anderer Sessions beantworten.
+
+READONLY_CMDS = ("ls", "peek", "wait", "result")
+
+# wie viel ein Permission-Mode erlaubt (höher = mehr ohne Rückfrage)
+PERM_RANK = {"plan": 0, "dontAsk": 0, "default": 1, "manual": 1, "acceptEdits": 2, "auto": 3,
+             "bypassPermissions": 4}
+# Modi, für die claude kein Flag braucht ("default" heißt in neueren Versionen "manual")
+PERM_PLAIN = ("default", "manual")
+
+# claude-Optionen, die eine Session ihren Unter-Sessions mitgeben darf
+CHILD_ARGS = ("--model", "--effort", "--fallback-model", "--permission-mode")
+
+
+def agents_enabled(cfg=None):
+    return (cfg or load_config()).get("agents") is not False
+
+
+def caller_session():
+    """Die ccm-Session, aus der dieser Befehl kommt (Claude → Bash → ccm), sonst None."""
+    i = os.environ.get("CCM_ID") or ""
+    return load_meta(i) if i.isalnum() else None
+
+
+def is_descendant(meta, ancestor_id, metas=None):
+    by_id = {m["id"]: m for m in (metas or load_metas())}
+    seen = set()
+    p = meta.get("parent")
+    while p and p not in seen:
+        if p == ancestor_id:
+            return True
+        seen.add(p)
+        p = (by_id.get(p) or {}).get("parent")
+    return False
+
+
+def require_child(caller, m, what):
+    if caller and not is_descendant(m, caller["id"]):
+        raise CCMError("»%s« ist keine Unter-Session von »%s«. Aus einer Session heraus kannst du nur "
+                       "eigene Unter-Sessions %s." % (m["name"], caller["name"], what))
+
+
+def require_not_self(caller, m):
+    if caller and m["id"] == caller["id"]:
+        raise CCMError("Das ist die eigene Session (»%s«)." % m["name"])
+
+
+def _opt_value(args, name):
+    """Wert der Option name in args (--x v oder --x=v), sonst None."""
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a[len(name) + 1:]
+    return None
+
+
+def child_args(parent, args, cfg):
+    """claude-Argumente für eine Unter-Session prüfen und den Permission-Mode vererben.
+    → (args, depth, text): text = freie Wörter zwischen/nach den Optionen (= Aufgabe)."""
+    depth = int(parent.get("depth") or 0) + 1
+    max_depth = int(cfg.get("max_depth") or 0)
+    if not agents_enabled(cfg):
+        raise CCMError("Unter-Sessions sind ausgeschaltet (\"agents\": false in %s)." % tilde(CONFIG_PATH))
+    if depth > max_depth:
+        raise CCMError("»%s« ist selbst eine Unter-Session und darf keine weiteren starten "
+                       "(max_depth %d in %s)." % (parent["name"], max_depth, tilde(CONFIG_PATH)))
+    live = tmux_list()
+    kids = [m for m in load_metas() if m.get("parent") == parent["id"] and TPREFIX + m["id"] in live]
+    max_kids = int(cfg.get("max_children") or 0)
+    if len(kids) >= max_kids:
+        raise CCMError("»%s« hat schon %d laufende Unter-Sessions (max_children %d). Erst welche "
+                       "beenden: ccm rm <name>" % (parent["name"], len(kids), max_kids))
+    out, words, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        key = a.split("=", 1)[0]
+        if a == "--":
+            pass
+        elif not a.startswith("-") or a == "-":
+            words.append(a)
+        elif a == "--dangerously-skip-permissions":
+            out += ["--permission-mode", "bypassPermissions"]
+        elif key in CHILD_ARGS:
+            if "=" in a:
+                out.append(a)
+            else:
+                if i + 1 >= len(args):
+                    raise CCMError("Option %s braucht einen Wert." % a)
+                out += [a, args[i + 1]]
+                i += 1
+        else:
+            raise CCMError("Option %s ist für Unter-Sessions nicht erlaubt (erlaubt: %s). Andere Optionen "
+                           "kann nur der Nutzer selbst setzen (ccn im Terminal)." % (a, ", ".join(CHILD_ARGS)))
+        i += 1
+    mine = str(read_state(parent["id"]).get("perm_mode") or "default")
+    my_rank = PERM_RANK.get(mine, 1)
+    want = _opt_value(out, "--permission-mode")
+    if want is None:
+        # vererben – außer Plan-Modus (die Unter-Session soll ja arbeiten) und Standard
+        if mine in PERM_RANK and mine != "plan" and mine not in PERM_PLAIN:
+            out += ["--permission-mode", mine]
+    elif want in PERM_PLAIN:
+        # Standard braucht kein Flag (und "default" kennen neuere claude-Versionen nicht mehr)
+        out = [a for k, a in enumerate(out) if a.split("=", 1)[0] != "--permission-mode"
+               and not (k and out[k - 1] == "--permission-mode")]
+    elif PERM_RANK.get(want, 99) > my_rank:
+        raise CCMError("Permission-Mode »%s« ist mehr, als »%s« selbst darf (%s). Unter-Sessions "
+                       "bekommen höchstens die Rechte ihrer Eltern-Session." % (want, parent["name"], mine))
+    return out, depth, " ".join(words)
+
+
+AGENT_PROMPT = """# ccm: parallel Claude Code sessions
+You are running inside ccm (Claude Code Manager) as session "{name}". With the `ccm` command you can start additional full Claude Code sessions that work in parallel, each in its own terminal that the user can watch and open in the ccm dashboard. Use this only when the user asks for several/parallel sessions (instead of subagents) or mentions ccm; otherwise work as usual.
+
+  ccm new -d -n NAME [-C DIR] [--model M] "TASK"   start a sub-session working on TASK (returns at once)
+  ccm wait NAME... [--any] [--timeout SEC] [--result]   block until the sessions stop working
+  ccm result NAME              print the session's final reply (its result)
+  ccm ls --children [--json]   status of your sub-sessions
+  ccm peek NAME                show the session's screen
+  ccm send NAME [--wait] "TEXT"   send a follow-up message (--wait: wait and print the reply)
+  ccm kill NAME / ccm rm NAME  stop / remove one of your sub-sessions
+
+- A sub-session starts without your context: put everything it needs into TASK (goal, relevant files, constraints, what to report). Its final reply is its result.
+- Use short unique names. Sessions in the same folder share the working tree; for parallel code changes give each one its own git worktree (`git worktree add ../NAME -b NAME`) and pass it with -C.
+- Sub-sessions inherit your permission mode and can never get more rights than you. You cannot answer their permission prompts or dialogs: if `ccm wait` reports permission/question/plan/input, tell the user which session needs them (they open it with `ccm a NAME`).
+- `ccm wait` blocks: give it a --timeout below your Bash timeout (e.g. `--timeout 540` with a 600000 ms Bash timeout) or run it in the background, and call it again if it times out.
+"""
+
+CHILD_PROMPT = """# ccm sub-session
+You were started by the Claude Code session "{parent}" (via ccm) to work on one part of a larger task. Work autonomously; nobody is watching this session live. Do not use AskUserQuestion: if you need a decision, make a reasonable choice or end your turn with the question. Finish with a self-contained final reply (what you did, results, changed files, open questions) — "{parent}" reads that reply as your result.
+"""
+
+
+def agent_prompt(meta, cfg):
+    if not agents_enabled(cfg):
+        return ""
+    parts = []
+    parent = load_meta(meta["parent"]) if meta.get("parent") else None
+    if parent:
+        parts.append(CHILD_PROMPT.format(parent=parent["name"]))
+    if int(meta.get("depth") or 0) < int(cfg.get("max_depth") or 0):
+        parts.append(AGENT_PROMPT.format(name=meta["name"]))
+    return "\n".join(parts)
+
+
+def with_system_prompt(args, text):
+    """text an --append-system-prompt anhängen, ohne eine eigene Angabe zu überschreiben."""
+    if not text or any(a.split("=", 1)[0] == "--append-system-prompt-file" for a in args):
+        return list(args)
+    out = list(args)
+    for i, a in enumerate(out):
+        if a == "--append-system-prompt" and i + 1 < len(out):
+            out[i + 1] = out[i + 1] + "\n\n" + text
+            return out
+        if a.startswith("--append-system-prompt="):
+            out[i] = a + "\n\n" + text
+            return out
+    return ["--append-system-prompt", text] + out
 
 
 SESSION_FLAGS_WITH_VALUE = ("-r", "--resume", "--session-id")
@@ -1052,6 +1271,7 @@ def cmd_run(sid):
             pass
     user_args = list(meta.get("args") or [])
     launched = int(meta.get("launched") or 0)
+    user_args = with_system_prompt(user_args, agent_prompt(meta, cfg))
     argv = [claude, "--settings", ensure_hooks_file(), "-n", meta["name"]]
     if launched and st.get("has_conv") and st.get("claude_sid"):
         # Fortsetzen: genau diese Unterhaltung wieder öffnen
@@ -1084,6 +1304,11 @@ def cmd_run(sid):
         env.pop(k, None)
     env["CCM_ID"] = sid
     env["CCM_DATA"] = DATA
+    import shutil
+    if agents_enabled(cfg) and not shutil.which("ccm", path=env.get("PATH")) \
+            and os.path.basename(LAUNCHER) == "ccm":
+        # damit Claude `ccm …` auch ohne ~/.local/bin im PATH findet
+        env["PATH"] = env.get("PATH", "/usr/bin:/bin") + os.pathsep + os.path.dirname(LAUNCHER)
     for sg in (signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP):
         signal.signal(sg, lambda *a: None)   # Handler (nicht SIG_IGN) → Kind bekommt Default
 
@@ -1208,7 +1433,7 @@ def derive_status(st, alive, scr, t):
 
 class View:
     __slots__ = ("id", "name", "cwd", "meta", "st", "status", "note", "alive", "attached",
-                 "unseen", "raw", "tname", "since")
+                 "unseen", "raw", "tname", "since", "depth")
 
 
 def snapshot(capture=True, escapes=False):
@@ -1241,8 +1466,42 @@ def snapshot(capture=True, escapes=False):
         done_t = float(v.st.get("done_t") or 0)
         v.unseen = (v.status in ("done", "error") and done_t > float(m.get("last_seen") or 0)
                     and not v.attached)
+        v.depth = 0
         views.append(v)
     return views
+
+
+def tree_order(views):
+    """Unter-Sessions direkt unter ihre Eltern-Session sortieren (setzt v.depth)."""
+    ids = {v.id for v in views}
+    kids = {}
+    roots = []
+    for v in views:
+        p = v.meta.get("parent")
+        if p in ids and p != v.id:
+            kids.setdefault(p, []).append(v)
+        else:
+            roots.append(v)
+    out, seen = [], set()
+
+    def walk(v, d):
+        if v.id in seen:
+            return
+        seen.add(v.id)
+        v.depth = d
+        out.append(v)
+        for k in kids.get(v.id, ()):
+            walk(k, d + 1)
+    for v in roots:
+        walk(v, 0)
+    for v in views:          # Zyklen (sollte es nicht geben) nicht verlieren
+        if v.id not in seen:
+            walk(v, 0)
+    return out
+
+
+def tree_prefix(v):
+    return ("  " * (v.depth - 1) + "└ ") if v.depth else ""
 
 
 def activity_text(v):
@@ -1454,12 +1713,19 @@ ccm %s – Claude-Code-Sessions in tmux
       -p, --prompt TEXT       erste Aufgabe für Claude
       -C, --dir ORDNER        Ordner (Standard: aktueller Ordner)
       -d, --detach            im Hintergrund starten, nicht öffnen
+      -w, --wait              im Hintergrund starten, warten bis Claude fertig ist,
+                              Antwort ausgeben (--timeout SEK)
       -- ARGS…                weitere claude-Argumente, z.B. -- --model sonnet
                               (unbekannte Optionen wie --model gehen auch direkt)
   ccm a [name]              Session öffnen (ohne Name: die im aktuellen Ordner)
-  ccm ls [--json]           Sessions auflisten
+  ccm ls [--json]           Sessions auflisten (--children: nur eigene Unter-Sessions)
   ccm peek <name>           Bildschirm einer Session zeigen, ohne sie zu öffnen
-  ccm send <name> <text>    Nachricht an eine Session schicken
+  ccm send <name> <text>    Nachricht an eine Session schicken (--wait: auf Antwort warten)
+  ccm wait <name>…          warten, bis die Sessions nicht mehr arbeiten
+      --any                   schon zurückkehren, sobald eine fertig ist
+      --timeout SEK           höchstens so lange warten (Exit-Code 124)
+      --result                danach die Antworten ausgeben
+  ccm result <name>         letzte Antwort einer Session vollständig ausgeben
   ccm rename <name> <neu>   Session umbenennen
   ccm kill <name>           Claude beenden (bleibt in der Liste, fortsetzbar)
   ccm resume <name>         beendete Session fortsetzen (--fresh: ohne Verlauf)
@@ -1470,6 +1736,14 @@ ccm %s – Claude-Code-Sessions in tmux
   ccm version               Version anzeigen
 
 In einer Session:   Ctrl-Q  → zurück (Claude arbeitet im Hintergrund weiter)
+
+Unter-Sessions: Claude kann in einer ccm-Session selbst `ccm new -d …` aufrufen und
+so weitere, vollwertige Sessions starten (statt Subagents), mit `ccm wait` auf sie
+warten und mit `ccm result` ihr Ergebnis lesen. Sie erscheinen im Dashboard unter
+der startenden Session. Aus einer Session heraus gilt: höchstens deren eigene
+Rechte (Permission-Mode wird vererbt), keine Freigaben für andere Sessions, und
+kill/rm/rename nur für eigene Unter-Sessions. Abschalten: "agents": false in
+der Konfiguration.
 """ % VERSION
 
 
@@ -1506,6 +1780,14 @@ def parse_new(argv):
             i += 1
         elif a in ("-d", "--detach", "--bg"):
             o["detach"] = True
+        elif a in ("-w", "--wait"):
+            o["wait"] = o["detach"] = True
+        elif a in ("-t", "--timeout"):
+            try:
+                o["timeout"] = float(val(i))
+            except ValueError:
+                raise CCMError("--timeout braucht Sekunden, z.B. --timeout 540")
+            i += 1
         elif a in ("-h", "--help"):
             print(HELP)
             sys.exit(0)
@@ -1537,7 +1819,19 @@ def attach_and_report(meta):
 
 def cmd_new(argv):
     o = parse_new(argv)
-    meta = create_session(o["dir"] or os.getcwd(), o["name"], o["prompt"], o["args"])
+    caller = caller_session()
+    meta = create_session(o["dir"] or os.getcwd(), o["name"], o["prompt"], o["args"], parent=caller)
+    if caller:
+        print("✓ Unter-Session »%s« gestartet in %s  ·  warten: ccm wait %s  ·  Ergebnis: ccm result %s"
+              % (meta["name"], tilde(meta["cwd"]), meta["name"], meta["name"]))
+        if o.get("wait"):
+            o["result"] = True
+            return wait_and_report([meta], o)
+        return 0
+    if o.get("wait"):
+        print("✓ Session »%s« gestartet in %s" % (meta["name"], tilde(meta["cwd"])))
+        o["result"] = True
+        return wait_and_report([meta], o)
     if o["detach"] or not tty():
         print("✓ Session »%s« gestartet in %s  ·  öffnen: ccm a %s" % (meta["name"], tilde(meta["cwd"]), meta["name"]))
         return 0
@@ -1561,6 +1855,7 @@ def cmd_attach(argv):
         alive = [x for x in here if TPREFIX + x["id"] in live]
         m = (alive or here)[-1]
     if not tmux_alive(TPREFIX + m["id"]):
+        require_child(caller_session(), m, "fortsetzen")
         resume_session(m)
         print("▶ Setze »%s« fort …" % m["name"])
     if not tty():
@@ -1592,15 +1887,32 @@ STATIC_GLYPH = {"working": ("●", 75), "compacting": ("●", 141), "starting": 
                 "done": ("✓", 114), "idle": ("○", 245), "error": ("✕", 203), "exited": ("■", 240)}
 
 
+def view_json(v, metas_by_id=None):
+    p = v.meta.get("parent")
+    return {
+        "id": v.id, "name": v.name, "cwd": v.cwd, "status": v.status, "since": v.since,
+        "attached": v.attached, "unseen": v.unseen, "activity": activity_text(v),
+        "prompt": v.st.get("prompt"), "claude_session_id": v.st.get("claude_sid"),
+        "parent": ((metas_by_id or {}).get(p) or {}).get("name") if p else None,
+        "needs_user": v.status in ATTN,
+    }
+
+
 def cmd_ls(argv):
-    views = snapshot(capture=True)
+    views = tree_order(snapshot(capture=True))
     t = now()
+    if "--children" in argv or "--mine" in argv:
+        me = caller_session()
+        if not me:
+            raise CCMError("--children geht nur aus einer ccm-Session heraus.")
+        metas = [v.meta for v in views]
+        views = [v for v in views if is_descendant(v.meta, me["id"], metas)]
     if "--json" in argv:
-        print(json.dumps([{
-            "id": v.id, "name": v.name, "cwd": v.cwd, "status": v.status, "since": v.since,
-            "attached": v.attached, "unseen": v.unseen, "activity": activity_text(v),
-            "prompt": v.st.get("prompt"), "claude_session_id": v.st.get("claude_sid"),
-        } for v in views], ensure_ascii=False, indent=1))
+        by_id = {m["id"]: m for m in load_metas()}
+        print(json.dumps([view_json(v, by_id) for v in views], ensure_ascii=False, indent=1))
+        return 0
+    if not views and ("--children" in argv or "--mine" in argv):
+        print("Keine Unter-Sessions.")
         return 0
     if not views:
         on = sys.stdout.isatty()
@@ -1609,7 +1921,7 @@ def cmd_ls(argv):
     import shutil
     on = sys.stdout.isatty()
     W = shutil.get_terminal_size((120, 24)).columns
-    nw = min(24, max(4, max(len(v.name) for v in views)))
+    nw = min(28, max(4, max(len(tree_prefix(v) + v.name) for v in views)))
     dirs = []
     for v in views:
         b = git_branch(v.cwd)
@@ -1624,7 +1936,8 @@ def cmd_ls(argv):
         d = short_path(d, dw_)
         act_w = max(0, W - (3 + nw + 2 + lw + 2 + dw_ + 2))
         act = oneline(activity_text(v), act_w) if act_w > 8 else ""
-        name = v.name if len(v.name) <= nw else v.name[: nw - 1] + "…"
+        name = tree_prefix(v) + v.name
+        name = name if len(name) <= nw else name[: nw - 1] + "…"
         print(" %s %s  %s  %s  %s" % (
             _c("38;5;%d" % col, g, on),
             _c("1", name.ljust(nw), on and (v.unseen or v.status in ATTN)),
@@ -1655,23 +1968,198 @@ def cmd_peek(argv):
     return 0
 
 
+def parse_wait_opts(argv, o):
+    """--wait / --timeout / --result / --json aus argv nehmen; Rest zurückgeben."""
+    rest, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-w", "--wait"):
+            o["wait"] = True
+        elif a in ("-t", "--timeout") or a.startswith("--timeout="):
+            v = a.split("=", 1)[1] if "=" in a else (argv[i + 1] if i + 1 < len(argv) else "")
+            if "=" not in a:
+                i += 1
+            try:
+                o["timeout"] = float(v)
+            except ValueError:
+                raise CCMError("--timeout braucht Sekunden, z.B. --timeout 540")
+        elif a == "--any":
+            o["any"] = True
+        elif a in ("-r", "--result"):
+            o["result"] = True
+        elif a == "--json":
+            o["json"] = True
+        elif a == "--":
+            rest += argv[i + 1:]
+            break
+        else:
+            rest.append(a)
+        i += 1
+    return rest
+
+
 def cmd_send(argv):
-    if len(argv) < 2:
-        raise CCMError("ccm send <name> <text>   (Text \"-\" liest von stdin)")
-    m = find_session(argv[0])
-    text = sys.stdin.read().strip() if argv[1:] == ["-"] else " ".join(argv[1:])
+    o = {}
+    head = argv[:1]
+    argv = argv[1:]
+    # Optionen nur direkt nach dem Namen, damit der Text selbst mit "-" anfangen darf
+    j = 0
+    while j < len(argv):
+        a = argv[j]
+        if a in ("-t", "--timeout"):
+            j += 2
+        elif a in ("-w", "--wait", "--json") or a.startswith("--timeout="):
+            j += 1
+        else:
+            break
+    parse_wait_opts(argv[:j], o)
+    argv = argv[j:]
+    if not head or not argv:
+        raise CCMError("ccm send <name> [--wait] <text>   (Text \"-\" liest von stdin)")
+    caller = caller_session()
+    m = find_session(head[0])
+    require_not_self(caller, m)
+    text = sys.stdin.read().strip() if argv == ["-"] else " ".join(argv)
     tname = TPREFIX + m["id"]
     if not tmux_alive(tname):
         raise CCMError("»%s« läuft nicht. Erst fortsetzen: ccm resume %s" % (m["name"], m["name"]))
+    if caller:
+        v = next((x for x in snapshot(capture=True) if x.id == m["id"]), None)
+        if v and v.status in ATTN:
+            raise CCMError("»%s« wartet auf den Nutzer (%s: %s). Freigaben und Dialoge kann nur der Nutzer "
+                           "selbst beantworten: ccm a %s" % (m["name"], LABELS.get(v.status, v.status),
+                                                             oneline(activity_text(v), 120), m["name"]))
+
+    def mark(st):
+        st["sent_t"] = now()
+        return None
+    update_state(m["id"], mark)
     tmux_send(tname, text=text, enter=True)
-    print("→ an »%s« gesendet" % m["name"])
+    if not o.get("wait"):
+        print("→ an »%s« gesendet" % m["name"])
+        return 0
+    o["result"] = True
+    return wait_and_report([m], o)
+
+
+# ───────────────────────────── warten & Ergebnisse ─────────────────────────────
+
+def _pending(v, t):
+    """Session hat eine Aufgabe bekommen, die Claude noch nicht angenommen hat."""
+    if not v.alive:
+        return False
+    st = v.st
+    if v.meta.get("prompt") and not st.get("has_conv") and t - float(st.get("launch_t") or 0) < 120:
+        return True
+    sent = float(st.get("sent_t") or 0)
+    return sent > float(st.get("turn_t") or 0) and t - sent < 30
+
+
+def wait_for(metas, any_=False, timeout=0, interval=1.0):
+    """Warten, bis die Sessions nicht mehr arbeiten. → (views, timed_out)"""
+    ids = [m["id"] for m in metas]
+    start = now()
+    while True:
+        t = now()
+        by_id = {v.id: v for v in snapshot(capture=True)}
+        vs = [by_id[i] for i in ids if i in by_id]
+        busy = [v for v in vs if v.status not in ATTN and v.status not in ("error", "exited")
+                and (v.status in BUSY or _pending(v, t))]
+        finished = len(vs) - len(busy)
+        if not busy or (any_ and finished):
+            return vs, False
+        if timeout and t - start >= timeout:
+            return vs, True
+        time.sleep(interval)
+
+
+def wait_and_report(metas, o):
+    vs, timed_out = wait_for(metas, o.get("any"), o.get("timeout") or 0)
+    t = now()
+    busy = [v for v in vs if v.status in BUSY or _pending(v, t)]
+    if o.get("json"):
+        out = []
+        for v in vs:
+            d = view_json(v)
+            d.pop("parent", None)
+            d["result"] = read_result(v.id) if o.get("result") and v not in busy else None
+            out.append(d)
+        print(json.dumps({"timed_out": timed_out, "sessions": out}, ensure_ascii=False, indent=1))
+        return 124 if timed_out else 0
+    nw = max(len(v.name) for v in vs) if vs else 4
+    for v in vs:
+        g, _ = STATIC_GLYPH.get(v.status, ("?", 0))
+        lab = LABELS.get(v.status, v.status)
+        act = oneline(activity_text(v), 160)
+        hint = "  ← braucht den Nutzer: ccm a %s" % v.name if v.status in ATTN else ""
+        print("%s %s  %s  %s%s" % (g, v.name.ljust(nw), lab, act, hint))
+    if o.get("result"):
+        for v in vs:
+            if v in busy:
+                continue
+            res = read_result(v.id)
+            print("\n── %s · %s ──\n%s" % (v.name, LABELS.get(v.status, v.status),
+                                         strip_ctrl(res, multiline=True) if res else "(noch keine Antwort)"))
+    if timed_out:
+        print("\n⏱ Timeout nach %ds – arbeitet noch: %s  (nochmal: ccm wait %s)" % (
+            round(o.get("timeout") or 0), ", ".join(v.name for v in busy), " ".join(v.name for v in busy)))
+        return 124
+    return 0
+
+
+def cmd_wait(argv):
+    o = {}
+    names = parse_wait_opts(argv, o)
+    caller = caller_session()
+    if not names:
+        if not caller:
+            raise CCMError("ccm wait <name>… [--any] [--timeout SEK] [--result]")
+        metas = load_metas()
+        live = tmux_list()
+        names = [m["id"] for m in metas if m.get("parent") == caller["id"] and TPREFIX + m["id"] in live]
+        if not names:
+            raise CCMError("Keine laufenden Unter-Sessions.")
+    metas = []
+    for q in names:
+        m = find_session(q)
+        require_not_self(caller, m)
+        if m not in metas:
+            metas.append(m)
+    return wait_and_report(metas, o)
+
+
+def cmd_result(argv):
+    o = {}
+    names = parse_wait_opts(argv, o)
+    if not names:
+        raise CCMError("ccm result <name>…")
+    t = now()
+    views = {v.id: v for v in snapshot(capture=True)}
+    out = []
+    for q in names:
+        m = find_session(q)
+        v = views.get(m["id"])
+        res = read_result(m["id"])
+        busy = bool(v and (v.status in BUSY or _pending(v, t)))
+        if o.get("json"):
+            out.append({"name": m["name"], "status": v.status if v else None, "busy": busy, "result": res})
+            continue
+        if len(names) > 1:
+            print("── %s ──" % m["name"])
+        if busy:
+            eprint("(»%s« arbeitet noch – das ist die vorige Antwort. Warten: ccm wait %s)" % (m["name"], m["name"]))
+        print(strip_ctrl(res, multiline=True) if res else "(»%s« hat noch nicht geantwortet)" % m["name"])
+    if o.get("json"):
+        print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 
 
 def cmd_rename(argv):
     if len(argv) != 2:
         raise CCMError("ccm rename <name> <neuer-name>")
-    m = rename_session(find_session(argv[0]), argv[1])
+    m = find_session(argv[0])
+    require_child(caller_session(), m, "umbenennen")
+    m = rename_session(m, argv[1])
     print("✓ umbenannt in »%s«" % m["name"])
     return 0
 
@@ -1679,8 +2167,11 @@ def cmd_rename(argv):
 def cmd_kill(argv):
     if not argv:
         raise CCMError("ccm kill <name>")
-    for q in argv:
-        m = find_session(q)
+    caller = caller_session()
+    ms = [find_session(q) for q in argv]
+    for m in ms:
+        require_child(caller, m, "beenden")
+    for m in ms:
         kill_session(m)
         print("■ »%s« beendet (fortsetzen: ccm resume %s)" % (m["name"], m["name"]))
     return 0
@@ -1690,8 +2181,11 @@ def cmd_rm(argv):
     names = [a for a in argv if not a.startswith("-")]
     if not names:
         raise CCMError("ccm rm <name> …")
-    for q in names:
-        m = find_session(q)
+    caller = caller_session()
+    ms = [find_session(q) for q in names]
+    for m in ms:
+        require_child(caller, m, "entfernen")
+    for m in ms:
         remove_session(m)
         print("✕ »%s« entfernt" % m["name"])
     return 0
@@ -1707,6 +2201,7 @@ def cmd_resume(argv):
     if tmux_alive(TPREFIX + m["id"]):
         print("»%s« läuft bereits." % m["name"])
     else:
+        require_child(caller_session(), m, "fortsetzen")
         resume_session(m, fresh=fresh)
         print("▶ »%s« %s" % (m["name"], "frisch gestartet" if fresh else "fortgesetzt"))
     if not detach and tty():
@@ -1899,6 +2394,8 @@ COMMANDS = {
     "kill": cmd_kill, "stop": cmd_kill,
     "resume": cmd_resume, "start": cmd_resume,
     "rm": cmd_rm, "remove": cmd_rm, "delete": cmd_rm,
+    "wait": cmd_wait,
+    "result": cmd_result, "res": cmd_result,
     "config": cmd_config,
 }
 

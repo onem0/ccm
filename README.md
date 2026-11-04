@@ -131,15 +131,50 @@ ccm                    # dashboard with all sessions
 | `ccn "Fix the tests"` | same, and Claude starts on the task right away |
 | `ccn --model sonnet` | unknown options are passed straight to `claude` |
 | `ccn -d "task"` | start in the background without opening it |
+| `ccn -w "task"` | start in the background, wait until Claude is done and print its reply |
 | `ccm a [name]` | open a session (without a name: the one in the current folder) |
 | `ccm ls` | list all sessions with their status (`--json` for scripts) |
 | `ccm peek <name>` | look at a session's screen without opening it |
-| `ccm send <name> <text>` | send a message to a session |
+| `ccm send <name> <text>` | send a message to a session (`--wait`: wait for the reply and print it) |
+| `ccm wait <name>…` | wait until the sessions stop working (`--any`, `--timeout SEC`, `--result`, `--json`) |
+| `ccm result <name>` | print a session's last reply in full |
 | `ccm kill <name>` | stop Claude (the session stays in the list and can be resumed) |
 | `ccm resume <name>` | resume a stopped session (`--fresh`: without the history) |
 | `ccm rename <old> <new>` / `ccm rm <name>` | rename / remove |
 | `ccm update` / `ccm version` | update from GitHub now / show the installed version |
 | `ccm help` | all options |
+
+## Sessions that start sessions
+
+Claude itself can use `ccm` inside a ccm session. So instead of subagents, you can ask a normal session to split the work into real, separate Claude Code sessions:
+
+```
+ccn
+> Split this into 5 ccm sessions: one per service, each fixes its failing tests. Wait for all of them and summarize.
+```
+
+Claude then runs something like this (every ccm session knows these commands):
+
+```sh
+ccm new -d -n api   -C ../wt-api   "Fix the failing tests in services/api …"
+ccm new -d -n shop  -C ../wt-shop  "…"
+ccm wait api shop … --timeout 540 --result     # blocks until they are done, prints their replies
+ccm send api --wait "Also update the changelog"  # follow-up, waits for the answer
+```
+
+That makes 6 sessions in total. The sub-sessions show up in the dashboard **indented under the session that started them**, and you can open any of them with `↵` to watch or step in. Each one has its own context and its own permission prompts.
+
+- A sub-session's **result** is its final reply (`ccm result <name>`, stored in full).
+- `ccm wait` returns as soon as no session is working any more, including when one **needs you** (permission prompt, question, plan). Claude then tells you which session to open.
+- Sub-sessions are told who started them, to work on their own, and to finish with a self-contained summary.
+- Read-only commands (`ccm ls`, `peek`, `wait`, `result`) run without a permission prompt. Starting or controlling sessions (`ccm new`, `send`, `kill` …) asks you like any other command, unless you allow it.
+
+Limits, so a session can't do more than you allowed it:
+
+- Sub-sessions **inherit the permission mode** of the session that starts them and can never get a more permissive one. Apart from `--model`, `--effort`, `--fallback-model` and `--permission-mode`, no claude options can be passed to them.
+- A session **cannot answer permission prompts or dialogs** of other sessions (`ccm send` refuses while one is open). Only you can.
+- From inside a session, `kill`, `rm`, `rename` and `resume` only work on its **own** sub-sessions, and it can't `send` to or `wait` for itself.
+- By default sub-sessions can't start further sub-sessions (`max_depth`), and a session can run at most 10 at once (`max_children`). Both can be changed in the config, and `"agents": false` turns the feature off completely.
 
 ## Dashboard keys
 
@@ -152,6 +187,7 @@ ccm                    # dashboard with all sessions
 - The status bar at the bottom shows which other sessions are waiting or done, plus the current session's **context usage** and your account's **5-hour and weekly limits** with their reset times, e.g. `Kontext 34%  5h 23% ↻14:30  Woche 41% ↻Fr 09:00`. Values turn yellow at 60 % and red at 85 %. The limits also appear in the dashboard header. They are only available with a Claude subscription (Pro/Max) and update after each reply from Claude.
 - Claude is started with `--settings ~/.local/share/ccm/claude-hooks.json`. The hooks report every event (prompt, tool call, permission request, done …) to `ccm`. Your `~/.claude/settings.json` is not changed.
 - The same file sets a `statusLine` command, which is how ccm gets context usage and limits from Claude Code. If you have your own `statusLine` in `~/.claude/settings.json`, ccm runs it afterwards with the same input, so it still shows up inside Claude. (A `statusLine` from a project's `.claude/settings.json` is deliberately not run.)
+- Every session also gets a short `--append-system-prompt` that explains the `ccm` commands for [sub-sessions](#sessions-that-start-sessions), and `CCM_ID` in its environment, so a `ccm` call from Claude knows which session it comes from.
 - ccm also reads each session's screen, so the status stays correct after an Esc interrupt or while a dialog is open.
 - Stopped sessions (even after a reboot) are resumed exactly where they left off with `claude --resume <id>`.
 
@@ -166,4 +202,5 @@ ccm                    # dashboard with all sessions
   { "claude_args": ["--model", "sonnet"] }
   ```
   If `claude` is not in your `PATH`, you can set its location here with `"claude": "/path/to/claude"`.
+  Sub-sessions: `"agents"` (default `true`), `"max_depth"` (default `1`), `"max_children"` (default `10`).
 - Optional `~/.config/ccm/tmux.conf` for your own tmux settings (loaded last).
