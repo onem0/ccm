@@ -1007,6 +1007,9 @@ class UI:
             parts.append(("● %d fertig" % nd, DONE, True))
         if allv:
             parts.append(("%d Sessions" % len(allv), DIM, False))
+        lvl_col = (MUTED, ATTN, ERR)
+        for label, val, extra, lvl in ccm.usage_parts(None):
+            parts.append(("%s %s%s" % (label, val, (" " + extra) if extra else ""), lvl_col[lvl], lvl == 2))
         parts.append((time.strftime("%H:%M"), MUTED, False))
         total = sum(dw(p[0]) for p in parts) + 3 * (len(parts) - 1) + 1
         xr = self.W - total
@@ -1167,7 +1170,13 @@ class UI:
         model = ccm.pretty_model(v.st.get("model") or (ti or {}).get("model"))
         if model:
             parts.append((model, MUTED))
-        if ti and ti.get("ctx"):
+        pct = v.st.get("ctx_pct")
+        if isinstance(pct, (int, float)):
+            txt = "ctx %d%%" % round(pct)
+            if ti and ti.get("ctx"):
+                txt += " (%s)" % ccm.fmt_tokens(ti["ctx"])
+            parts.append((txt, (MUTED, ATTN, ERR)[ccm.usage_level(pct)]))
+        elif ti and ti.get("ctx"):
             parts.append(("ctx " + ccm.fmt_tokens(ti["ctx"]), MUTED))
         if v.alive:
             lt = v.st.get("launch_t") or v.meta.get("launch_t")

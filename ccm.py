@@ -36,6 +36,7 @@ EVENT_DIR = os.path.join(DATA, "events")
 HOOKS_PATH = os.path.join(DATA, "claude-hooks.json")
 TMUX_CONF = os.path.join(DATA, "tmux.conf")
 STATUS_SH = os.path.join(DATA, "tmux-status.sh")
+LIMITS_PATH = os.path.join(DATA, "limits.json")
 CONFIG_PATH = os.path.join(_xdg("XDG_CONFIG_HOME", ".config"), "ccm", "config.json")
 
 # wird vom Launcher-Skript überschrieben (realpath von ~/dev/ccm/ccm)
@@ -612,8 +613,128 @@ def ensure_hooks_file():
     for e in ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "StopFailure",
               "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "SessionEnd"):
         hooks[e] = [{"hooks": [h]}]
-    write_if_changed(HOOKS_PATH, json.dumps({"hooks": hooks}, indent=1) + "\n")
+    # Die Statuszeile liefert Kontext-% und die Limits (5h / Woche). ccm reicht
+    # danach an deine eigene statusLine weiter (siehe cmd_statusline).
+    sl = {"type": "command", "command": "CCM_DATA=%s %s _statusline" % (shlex.quote(DATA), self_cmd())}
+    own = user_statusline()
+    if own and isinstance(own.get("padding"), int):
+        sl["padding"] = own["padding"]
+    write_if_changed(HOOKS_PATH, json.dumps({"hooks": hooks, "statusLine": sl}, indent=1) + "\n")
     return HOOKS_PATH
+
+
+# ───────────────────────────── Statuszeile: Kontext & Limits ─────────────────────────────
+
+def claude_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+
+
+def user_statusline():
+    """Deine eigene statusLine aus ~/.claude/settings.json, damit ccm sie weiter ausführt.
+    Bewusst nur die Benutzer-Einstellung: eine statusLine aus der .claude/settings.json
+    eines fremden Repos soll ccm nicht ausführen (Claude fragt dafür erst nach Vertrauen)."""
+    d = read_json(os.path.join(claude_dir(), "settings.json"), None)
+    sl = d.get("statusLine") if isinstance(d, dict) else None
+    if isinstance(sl, dict) and isinstance(sl.get("command"), str) and "_statusline" not in sl["command"]:
+        return sl
+    return None
+
+
+def read_limits():
+    """Letzter bekannter Stand der Konto-Limits; abgelaufene Fenster fallen weg."""
+    d = read_json(LIMITS_PATH, {})
+    out, t = {}, now()
+    for k in ("five_hour", "seven_day"):
+        w = d.get(k) if isinstance(d, dict) else None
+        if not isinstance(w, dict):
+            continue
+        try:
+            pct, reset = float(w["used_percentage"]), float(w.get("resets_at") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not reset or reset > t:
+            out[k] = {"pct": pct, "reset": reset}
+    return out
+
+
+WEEKDAYS = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+
+
+def fmt_reset(ts):
+    if not ts:
+        return ""
+    lt = time.localtime(ts)
+    if time.localtime(now())[:3] == lt[:3]:
+        return time.strftime("%H:%M", lt)
+    return "%s %s" % (WEEKDAYS[lt.tm_wday], time.strftime("%H:%M", lt))
+
+
+def usage_level(pct):
+    """0 = ok, 1 = wird knapp, 2 = fast voll"""
+    return 2 if pct >= 85 else 1 if pct >= 60 else 0
+
+
+def usage_parts(st):
+    """[(label, wert, zusatz, stufe)] für Kontext der Session `st` und die Konto-Limits."""
+    parts = []
+    pct = st.get("ctx_pct") if st else None
+    if isinstance(pct, (int, float)):
+        parts.append(("Kontext", "%d%%" % round(pct), "", usage_level(pct)))
+    lim = read_limits()
+    for k, label in (("five_hour", "5h"), ("seven_day", "Woche")):
+        w = lim.get(k)
+        if w:
+            r = fmt_reset(w["reset"])
+            parts.append((label, "%d%%" % round(w["pct"]), ("↻" + r) if r else "", usage_level(w["pct"])))
+    return parts
+
+
+def cmd_statusline():
+    """Von Claude Code als statusLine aufgerufen: Kontext und Limits merken, dann
+    deine eigene statusLine ausführen und deren Ausgabe durchreichen."""
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    try:
+        save_statusline(data)
+    except Exception as e:  # niemals Claude stören
+        try:
+            with open(os.path.join(DATA, "hook-errors.log"), "a") as f:
+                f.write("%s statusline: %r\n" % (time.strftime("%F %T"), e))
+        except OSError:
+            pass
+    own = user_statusline()
+    if own:
+        import subprocess
+        try:
+            r = subprocess.run(own["command"], shell=True, input=raw, capture_output=True, text=True,
+                               cwd=data.get("cwd") or None, timeout=10, errors="replace")
+            sys.stdout.write(r.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0
+
+
+def save_statusline(data):
+    sid = os.environ.get("CCM_ID") or ""
+    cw = data.get("context_window") if isinstance(data.get("context_window"), dict) else {}
+    pct = cw.get("used_percentage")
+    if sid.isalnum() and os.path.exists(meta_path(sid)) and isinstance(pct, (int, float)):
+        new = {"ctx_pct": round(float(pct), 1), "ctx_size": cw.get("context_window_size")}
+        st = read_state(sid)
+        if any(st.get(k) != v for k, v in new.items()):
+            update_state(sid, lambda s: s.update(new))
+    rl = data.get("rate_limits")
+    if isinstance(rl, dict):
+        lim = {k: rl[k] for k in ("five_hour", "seven_day") if isinstance(rl.get(k), dict)}
+        old = read_json(LIMITS_PATH, {})
+        if lim and (not isinstance(old, dict) or {k: old.get(k) for k in lim} != lim):
+            lim["t"] = round(now())
+            write_json(LIMITS_PATH, lim)
 
 
 def truecolor():
@@ -1618,6 +1739,14 @@ def cmd_tmux_status(cur):
         parts.append("#[fg=colour75]● %d aktiv" % len(work))
     if done:
         parts.append("#[fg=colour114]✓ %d fertig" % len(done))
+    me = next((v for v in views if v.tname == cur), None)
+    usage = []
+    for label, val, extra, lvl in usage_parts(me.st if me else None):
+        col = ("colour250", "colour221", "colour203,bold")[lvl]
+        usage.append("#[fg=colour245]%s #[fg=%s]%s#[nobold]%s" % (
+            label, col, val, ("#[fg=colour241] " + extra) if extra else ""))
+    if usage:
+        parts.append("  ".join(usage))
     print(("  ".join(parts) + "#[default]") if parts else "")
     return 0
 
@@ -1659,6 +1788,8 @@ def main(argv=None):
         c, rest = args[0], args[1:]
         if c == "_hook":
             return cmd_hook()
+        if c == "_statusline":
+            return cmd_statusline()
         if c == "_run":
             return cmd_run(rest[0])
         if c == "_status":

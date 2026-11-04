@@ -148,8 +148,10 @@ ccm                    # dashboard with all sessions
 ## How it works
 
 - Every session is a tmux session on a separate tmux server (`tmux -L ccm ls`). Your own tmux sessions are left alone.
-- This tmux server has **no prefix key**, so it doesn't clash with Claude's `Ctrl-B`. The only key is `Ctrl-Q` = back. A status bar at the bottom shows which other sessions are waiting or done.
+- This tmux server has **no prefix key**, so it doesn't clash with Claude's `Ctrl-B`. The only key is `Ctrl-Q` = back.
+- The status bar at the bottom shows which other sessions are waiting or done, plus the current session's **context usage** and your account's **5-hour and weekly limits** with their reset times, e.g. `Kontext 34%  5h 23% ↻14:30  Woche 41% ↻Fr 09:00`. Values turn yellow at 60 % and red at 85 %. The limits also appear in the dashboard header. They are only available with a Claude subscription (Pro/Max) and update after each reply from Claude.
 - Claude is started with `--settings ~/.local/share/ccm/claude-hooks.json`. The hooks report every event (prompt, tool call, permission request, done …) to `ccm`. Your `~/.claude/settings.json` is not changed.
+- The same file sets a `statusLine` command, which is how ccm gets context usage and limits from Claude Code. If you have your own `statusLine` in `~/.claude/settings.json`, ccm runs it afterwards with the same input, so it still shows up inside Claude. (A `statusLine` from a project's `.claude/settings.json` is deliberately not run.)
 - ccm also reads each session's screen, so the status stays correct after an Esc interrupt or while a dialog is open.
 - Stopped sessions (even after a reboot) are resumed exactly where they left off with `claude --resume <id>`.
 
