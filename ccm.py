@@ -98,6 +98,16 @@ def read_json(path, default=None):
         return default
 
 
+def secure_data_dir():
+    """DATA enthält Prompts und Antworten → nur für den eigenen Benutzer (0700)."""
+    try:
+        os.makedirs(DATA, mode=0o700, exist_ok=True)
+        if os.stat(DATA).st_mode & 0o077:
+            os.chmod(DATA, 0o700)
+    except OSError:
+        pass
+
+
 def write_json(path, data, pretty=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "%s.%d.tmp" % (path, os.getpid())
@@ -132,8 +142,18 @@ def tilde(p):
     return p
 
 
+# C0- und C1-Steuerzeichen (ESC, CSI, BEL …). Texte aus Hooks stammen von Claude
+# bzw. aus Dateien/Tool-Ausgaben und dürfen das Terminal nicht steuern.
+_CTRL = dict.fromkeys(c for c in range(0xa0) if c < 0x20 or c >= 0x7f)
+_CTRL_ML = {c: v for c, v in _CTRL.items() if c not in (9, 10)}
+
+
+def strip_ctrl(s, multiline=False):
+    return str(s or "").translate(_CTRL_ML if multiline else _CTRL)
+
+
 def oneline(s, n=200):
-    s = " ".join(str(s or "").split())
+    s = strip_ctrl(" ".join(str(s or "").split()))
     return s if len(s) <= n else s[: max(0, n - 1)] + "…"
 
 
@@ -680,31 +700,31 @@ def tmux_list():
     return out
 
 
-MARK = "@@ccm-capture@@"
-
-
 def tmux_capture(names, escapes=True):
     """Bildschirminhalt mehrerer Sessions mit EINEM tmux-Aufruf holen."""
     out = {}
     if not names:
         return out
+    # Zufälliger Trenner pro Aufruf: ein Pane-Inhalt kann ihn nicht vorhersagen
+    # und sich damit nicht als Ausgabe einer anderen Session ausgeben.
+    mark = "@@ccm-%s@@" % os.urandom(12).hex()
 
     def run(ns):
         args = []
         for n in ns:
             if args:
                 args.append(";")
-            args += ["display-message", "-p", MARK + n, ";", "capture-pane", "-p"]
+            args += ["display-message", "-p", mark + n, ";", "capture-pane", "-p"]
             if escapes:
                 args.append("-e")
             args += ["-t", "=%s:" % n]
         r = tmux_run(args)
         cur, buf = None, []
         for line in r.stdout.split("\n"):
-            if line.startswith(MARK):
+            if line.startswith(mark):
                 if cur:
                     out[cur] = "\n".join(buf)
-                cur, buf = line[len(MARK):], []
+                cur, buf = line[len(mark):], []
             elif cur is not None:
                 buf.append(line)
         if cur:
@@ -1499,7 +1519,7 @@ def cmd_peek(argv):
         st = read_state(m["id"])
         print("»%s« ist beendet." % m["name"])
         if st.get("last_msg"):
-            print("\nLetzte Antwort:\n" + st["last_msg"])
+            print("\nLetzte Antwort:\n" + strip_ctrl(st["last_msg"], multiline=True))
         return 0
     args = ["capture-pane", "-p", "-t", "=%s:" % tname]
     if sys.stdout.isatty():
@@ -1630,6 +1650,7 @@ def main(argv=None):
     argv = sys.argv if argv is None else argv
     prog = os.path.basename(argv[0]) if argv else "ccm"
     args = argv[1:]
+    secure_data_dir()
     try:
         if prog == "ccn":
             return cmd_new(args)
