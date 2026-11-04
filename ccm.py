@@ -1821,9 +1821,9 @@ def cmd_update(verbose=False):
     import fcntl
     with open(os.path.join(DATA, ".update.lock"), "a") as lk:
         try:
-            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # von Hand (ccm update): auf ein laufendes Hintergrund-Update warten
+            fcntl.flock(lk, fcntl.LOCK_EX if verbose else fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            say("Es läuft schon ein Update.")
             return 0
         try:
             old = app_revision()
@@ -1908,7 +1908,7 @@ def main(argv=None):
     prog = os.path.basename(argv[0]) if argv else "ccm"
     args = argv[1:]
     secure_data_dir()
-    if prog == "ccn" or not args or not args[0].startswith("_"):
+    if prog == "ccn" or not args or not (args[0].startswith("_") or args[0] == "update"):
         start_update()   # nur bei Befehlen von dir, nicht bei Hooks & Statusleiste
     try:
         if prog == "ccn":
