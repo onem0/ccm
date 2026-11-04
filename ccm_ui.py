@@ -1543,13 +1543,42 @@ class UI:
                     or time.time() < self.toast_until)
             self.scr.timeout(100 if anim else 400)
             try:
-                k = self.scr.get_wch()
+                k = read_key(self.scr)
             except curses.error:
                 continue
             except KeyboardInterrupt:
                 break
             self.on_key(k)
         return 0
+
+
+# Manche Python-Builds (z.B. python.org-Installer für macOS) haben curses ohne
+# Wide-Char-Funktionen, also ohne get_wch. Dann liest read_key Bytes mit getch
+# und setzt UTF-8-Zeichen selbst zusammen – mit demselben Ergebnis wie get_wch:
+# str für Zeichen, int für Sondertasten (curses.KEY_*), curses.error bei Timeout.
+HAVE_WCH = hasattr(curses.window, "get_wch")
+
+
+def read_key(scr):
+    if HAVE_WCH:
+        return scr.get_wch()
+    c = scr.getch()
+    if c == -1:
+        raise curses.error("no input")
+    if c > 0xff:
+        return c
+    if c < 0x80:
+        return chr(c)
+    need = 1 if c >> 5 == 0b110 else 2 if c >> 4 == 0b1110 else 3 if c >> 3 == 0b11110 else 0
+    buf = bytearray([c])
+    for _ in range(need):
+        d = scr.getch()
+        if not 0x80 <= d <= 0xbf:
+            if d != -1:
+                curses.ungetch(d)
+            break
+        buf.append(d)
+    return buf.decode("utf-8", "replace")
 
 
 def run():
